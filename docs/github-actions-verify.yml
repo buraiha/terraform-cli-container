@@ -1,0 +1,21 @@
+name: Verify CLI container
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash -n bin/tfbox && bash tests/wrapper.sh && bash tests/install.sh
+      - run: TFBOX_RUNTIME=docker bin/tfbox build
+      - run: |
+          export TFBOX_RUNTIME=docker
+          bin/tfbox tf version
+          bin/tfbox az version
+          mkdir /tmp/tfbox-smoke
+          cd /tmp/tfbox-smoke
+          printf 'terraform { required_version = ">= 1.7.5" }\n' > main.tf
+          "$GITHUB_WORKSPACE/bin/tfbox" tf init -backend=false
+          "$GITHUB_WORKSPACE/bin/tfbox" tf validate
+          "$GITHUB_WORKSPACE/bin/tfbox" tf plan -out=smoke.tfplan

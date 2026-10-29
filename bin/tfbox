@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Managed by terraform-cli-container installer
+set -euo pipefail
+runtime=${TFBOX_RUNTIME:-podman}
+image=${TFBOX_IMAGE:-localhost/terraform-cli:1.7.5}
+volume=${TFBOX_AZURE_VOLUME:-terraform-cli-azure}
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+root=${TFBOX_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/terraform-cli-container}
+# Direct source-tree execution remains available for development.
+if [[ -f "$script_dir/install.sh" && -f "$script_dir/../Containerfile" && -z ${TFBOX_DATA_DIR:-} ]]; then
+  root=$(cd "$script_dir/.." && pwd -P)
+fi
+command -v "$runtime" >/dev/null || { echo "Runtime not found: $runtime" >&2; exit 1; }
+command=${1:-help}
+if (($#)); then shift; fi
+case "$command" in
+  build)
+    [[ -f "$root/Containerfile" ]] || { echo 'Containerfileがありません。再インストールしてください。' >&2; exit 1; }
+    exec "$runtime" build --build-arg "TF_VERSION=${TFBOX_TF_VERSION:-1.7.5}" -t "$image" -f "$root/Containerfile" "$root" ;;
+  help|-h|--help)
+    echo 'Usage: tfbox {build|az ARGS...|tf ARGS...|shell}'
+    exit 0 ;;
+  az|tf|shell) ;;
+  *) echo "Unknown command: $command" >&2; exit 2 ;;
+esac
+args=(run --rm --interactive)
+if [[ -t 0 && -t 1 ]]; then args+=(--tty); fi
+# On Linux, preserve ownership of state, provider and lock files.
+if [[ $(uname -s) == Linux ]]; then
+  init_args=()
+  if [[ $runtime == podman ]]; then
+    args+=(--userns=keep-id)
+    init_args+=(--userns=keep-id)
+  fi
+  "$runtime" run --rm "${init_args[@]}" --user 0:0 --workdir /tmp --volume "$volume:/azure" "$image" chown "$(id -u):$(id -g)" /azure
+  args+=(--user "$(id -u):$(id -g)")
+fi
+args+=(--env HOME=/tmp/tfbox-home --env AZURE_CONFIG_DIR=/azure
+       --volume "$volume:/azure")
+if [[ $command == az ]]; then
+  args+=(--workdir /tmp)
+else
+  args+=(--workdir /work)
+  args+=(--volume "$PWD:/work")
+  if [[ -n ${TFBOX_SSH_PUBLIC_KEY:-} ]]; then
+    [[ -f $TFBOX_SSH_PUBLIC_KEY && $TFBOX_SSH_PUBLIC_KEY == *.pub ]] || {
+      echo 'TFBOX_SSH_PUBLIC_KEY must point to an existing .pub file' >&2; exit 2;
+    }
+    args+=(--volume "$TFBOX_SSH_PUBLIC_KEY:$TFBOX_SSH_PUBLIC_KEY:ro")
+  fi
+fi
+# Forward only explicitly named provider/backend variables, without writing values to disk.
+for name in ARM_SUBSCRIPTION_ID ARM_TENANT_ID ARM_CLIENT_ID ARM_CLIENT_SECRET ARM_USE_OIDC ARM_OIDC_TOKEN ARM_USE_AZUREAD; do
+  if [[ -n ${!name:-} ]]; then args+=(--env "$name"); fi
+done
+case "$command" in
+  az) exec "$runtime" "${args[@]}" "$image" az "$@" ;;
+  tf) exec "$runtime" "${args[@]}" "$image" terraform "$@" ;;
+  shell) exec "$runtime" "${args[@]}" "$image" /bin/bash "$@" ;;
+esac
